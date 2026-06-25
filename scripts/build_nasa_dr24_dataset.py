@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -214,11 +215,7 @@ def download_kepler_light_curve(kepid: int, cache_dir: Path):
     return time_values[mask], flux_values[mask]
 
 
-def materialize_row(row: pd.Series, curve_cache: dict[int, tuple[np.ndarray, np.ndarray] | None], cache_dir: Path, sequence_length: int):
-    kepid = int(row["kepid"])
-    if kepid not in curve_cache:
-        curve_cache[kepid] = download_kepler_light_curve(kepid, cache_dir)
-    curve = curve_cache[kepid]
+def materialize_row_from_curve(row: pd.Series, curve: tuple[np.ndarray, np.ndarray] | None, sequence_length: int):
     if curve is None:
         return None
     time_values, flux_values = curve
@@ -275,25 +272,33 @@ def build_lightcurve_dataset(
     sequence_length: int,
     max_rows: int | None,
     seed: int,
+    keep_lightcurve_cache: bool,
 ) -> tuple[pd.DataFrame, dict]:
     if max_rows and max_rows < len(labeled):
         labeled = labeled.sample(n=max_rows, random_state=seed).reset_index(drop=True)
     cache_dir = DR24_DIR / "lightkurve-cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    curve_cache: dict[int, tuple[np.ndarray, np.ndarray] | None] = {}
     rows = []
     failures = []
-    for index, row in labeled.iterrows():
+    processed = 0
+    for kepid, group in labeled.groupby("kepid", sort=False):
+        target_cache_dir = cache_dir / str(int(kepid))
         try:
-            materialized = materialize_row(row, curve_cache, cache_dir, sequence_length)
+            curve = download_kepler_light_curve(int(kepid), target_cache_dir)
+        except Exception as exc:
+            curve = None
+            failures.append({"kepid": int(kepid), "reason": str(exc)})
+        for index, row in group.iterrows():
+            processed += 1
+            materialized = materialize_row_from_curve(row, curve, sequence_length)
             if materialized is None:
-                failures.append({"index": int(index), "kepid": int(row["kepid"]), "reason": "no_light_curve"})
+                failures.append({"index": int(index), "kepid": int(kepid), "reason": "no_light_curve"})
                 continue
             rows.append(materialized)
-        except Exception as exc:
-            failures.append({"index": int(index), "kepid": int(row["kepid"]), "reason": str(exc)})
-        if (index + 1) % 50 == 0:
-            print(f"materialized {len(rows)} rows from {index + 1} TCE rows; failures={len(failures)}", flush=True)
+        if not keep_lightcurve_cache:
+            shutil.rmtree(target_cache_dir, ignore_errors=True)
+        if processed % 50 == 0 or processed >= len(labeled):
+            print(f"materialized {len(rows)} rows from {processed} TCE rows; failures={len(failures)}", flush=True)
     dataset = pd.DataFrame(rows)
     split_summary = write_split_parquets(dataset, output_dir, seed=seed) if len(dataset) else {}
     return dataset, {"materialized_rows": int(len(dataset)), "failures": failures[:50], "split_summary": split_summary}
@@ -321,6 +326,7 @@ def build_manifest(metadata: pd.DataFrame, labeled: pd.DataFrame, args: argparse
         "human_reviewed_rows": int(labeled["label_is_human_reviewed"].sum()) if len(labeled) else 0,
         "sequence_length": int(args.sequence_length),
         "lightcurves_downloaded": bool(args.download_lightcurves),
+        "kept_lightcurve_cache": bool(args.keep_lightcurve_cache),
         "materialization": materialization or {},
         "notes": [
             "clean labels use av_training_set and exclude UNK",
@@ -335,6 +341,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--label-source", choices=["clean", "predicted"], default="clean")
     parser.add_argument("--max-metadata-rows", type=int, default=None)
     parser.add_argument("--download-lightcurves", action="store_true")
+    parser.add_argument("--keep-lightcurve-cache", action="store_true")
     parser.add_argument("--max-lightcurve-rows", type=int, default=None)
     parser.add_argument("--sequence-length", type=int, default=1024)
     parser.add_argument("--output-dir", type=Path, default=PROCESSED_DIR)
@@ -358,6 +365,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             sequence_length=args.sequence_length,
             max_rows=args.max_lightcurve_rows,
             seed=args.seed,
+            keep_lightcurve_cache=args.keep_lightcurve_cache,
         )
     manifest = build_manifest(metadata, labeled, args, materialization=materialization)
     manifest["elapsed_seconds"] = round(time.time() - start, 2)
