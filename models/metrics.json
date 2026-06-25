@@ -1,0 +1,28 @@
+{
+  "model_name": "XGBoost baseline",
+  "rows_used": 6000,
+  "features": 58,
+  "positive_rate": 0.41383333333333333,
+  "precision": 0.8126009693053312,
+  "recall": 0.9212454212454212,
+  "f1": 0.863519313304721,
+  "roc_auc": 0.9508026426631077,
+  "pr_auc": 0.9138196045666765,
+  "confusion_matrix": {
+    "labels": [
+      "not_planet",
+      "planet"
+    ],
+    "values": [
+      [
+        658,
+        116
+      ],
+      [
+        43,
+        503
+      ]
+    ]
+  },
+  "elapsed_seconds": 148.59
+}

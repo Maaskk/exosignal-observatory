@@ -1,0 +1,31 @@
+{
+  "name": "exoplanet-hunter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5173",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 4173",
+    "api": "./.venv/bin/python -m uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000",
+    "download:data": "./.venv/bin/python scripts/download_dataset.py --splits metadata test val",
+    "download:data:full": "./.venv/bin/python scripts/download_dataset.py --splits metadata train val test",
+    "download:nasa:catalogs": "./.venv/bin/python scripts/fetch_nasa_catalogs.py",
+    "train": "./.venv/bin/python scripts/train_model.py",
+    "demo:model": "./.venv/bin/python scripts/train_model.py --max-rows 6000",
+    "train:deep": "./.venv/bin/python scripts/train_deep_learning.py",
+    "train:deep:memory": "./.venv/bin/python scripts/train_deep_learning.py --print-memory-plan --sweep-sequence-lengths 512,1024,2048",
+    "train:deep:smoke": "./.venv/bin/python scripts/train_deep_learning.py --smoke --max-train-rows 512 --max-val-rows 256 --max-test-rows 256",
+    "train:deep:tune": "./.venv/bin/python scripts/train_deep_learning.py --task binary --model-family hybrid --sequence-length 1024 --tune --tuner random --max-trials 24 --mixed-precision --augment --loss focal"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.1.1",
+    "vite": "^7.2.7",
+    "typescript": "^5.9.3",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "three": "^0.182.0",
+    "lucide-react": "^0.562.0"
+  },
+  "devDependencies": {}
+}

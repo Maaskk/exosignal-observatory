@@ -1,0 +1,16 @@
+{
+  "model_type": "keras_1d_cnn",
+  "model_path": "models/deep_lightcurve_cnn.keras",
+  "sequence_length": 256,
+  "array_columns": [
+    "flux_global",
+    "flux_local",
+    "flux_odd",
+    "flux_even"
+  ],
+  "input_channels": 4,
+  "threshold": 0.5,
+  "normalization": "median-normalized, clipped to [0.75, 1.25], interpolated",
+  "training_environment": "Google Colab T4 GPU",
+  "artifact_status": "metrics_exported; keras weight file remains in Colab runtime until artifact zip is downloaded"
+}
