@@ -1,7 +1,12 @@
 {
-  "model_type": "keras_1d_cnn",
+  "model_type": "keras_hybrid_cnn_engineered_features",
   "model_path": "models/deep_lightcurve_cnn.keras",
-  "sequence_length": 256,
+  "task": "binary",
+  "class_names": [
+    "not_planet",
+    "planet"
+  ],
+  "sequence_length": 1024,
   "array_columns": [
     "flux_global",
     "flux_local",
@@ -9,8 +14,19 @@
     "flux_even"
   ],
   "input_channels": 4,
-  "threshold": 0.5,
+  "engineered_feature_count": 46,
+  "threshold": 0.38,
   "normalization": "median-normalized, clipped to [0.75, 1.25], interpolated",
   "training_environment": "Google Colab T4 GPU",
-  "artifact_status": "metrics_exported; keras weight file remains in Colab runtime until artifact zip is downloaded"
+  "training_features": [
+    "full training split",
+    "focal loss",
+    "class weights",
+    "light-curve augmentation",
+    "mixed precision",
+    "cosine learning-rate schedule",
+    "KerasTuner random search",
+    "hybrid CNN plus dense engineered-feature branch"
+  ],
+  "artifact_status": "final metrics exported locally; Keras weight artifact produced in Colab artifact zip"
 }

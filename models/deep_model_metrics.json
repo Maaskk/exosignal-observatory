@@ -1,21 +1,23 @@
 {
-  "model_name": "1D CNN deep light-curve model",
+  "model_name": "hybrid CNN + engineered-feature model",
   "training_environment": "Google Colab T4 GPU",
-  "training_rows": 12000,
+  "training_rows": 18853,
+  "validation_rows": 2357,
   "test_rows": 2357,
-  "sequence_length": 256,
+  "sequence_length": 1024,
   "input_channels": [
     "flux_global",
     "flux_local",
     "flux_odd",
     "flux_even"
   ],
-  "threshold": 0.5,
-  "precision": 0.6633309506790565,
-  "recall": 0.9469387755102041,
-  "f1": 0.7801597309794032,
-  "roc_auc": 0.7769811628355046,
-  "pr_auc": 0.6080105534092913,
+  "engineered_feature_count": 46,
+  "threshold": 0.38,
+  "precision": 0.775563,
+  "recall": 0.913265,
+  "f1": 0.8388,
+  "roc_auc": 0.944019,
+  "pr_auc": 0.91256,
   "confusion_matrix": {
     "labels": [
       "not_planet",
@@ -23,14 +25,23 @@
     ],
     "values": [
       [
-        906,
-        471
+        1118,
+        259
       ],
       [
-        52,
-        928
+        85,
+        895
       ]
     ]
   },
-  "notes": "First Colab CNN baseline trained on the curated Kepler/K2/TESS folded light-curve dataset. High recall is useful for candidate prioritization; precision and AUC show this is not yet a production scientific model."
+  "best_tuner_result": {
+    "validation_pr_auc": 0.9084401726722717,
+    "batch_size": 64,
+    "filters": 32,
+    "kernel_size": 11,
+    "dropout": 0.2,
+    "learning_rate": 0.01,
+    "dense_units": 192
+  },
+  "notes": "Final tuned Colab model trained on the full 18,853-row training split with focal loss, light-curve augmentation, mixed precision, cosine learning-rate decay, and a hybrid CNN plus engineered-feature branch. XGBoost remains the strongest active baseline by F1."
 }
