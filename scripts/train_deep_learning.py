@@ -31,6 +31,7 @@ MODEL_PATH = MODELS_DIR / "deep_lightcurve_cnn.keras"
 METRICS_PATH = MODELS_DIR / "deep_model_metrics.json"
 CONFIG_PATH = MODELS_DIR / "deep_model_config.json"
 COMPARISON_PATH = REPORTS_DIR / "deep_learning_experiment_results.json"
+TUNER_RESULT_PATH = REPORTS_DIR / "deep_learning_tuner_result.json"
 
 ARRAY_COLUMNS = ["flux_global", "flux_local", "flux_odd", "flux_even"]
 VALID_CLASSES = ["FALSE_POSITIVE", "NO_SIGNAL", "PLANET"]
@@ -613,9 +614,38 @@ def tuner_search(config: ExperimentConfig) -> dict:
         "batch_size_searches": searches,
         "feature_count": len(feature_columns),
     }
-    (REPORTS_DIR / "deep_learning_tuner_result.json").write_text(json.dumps(result, indent=2))
+    TUNER_RESULT_PATH.write_text(json.dumps(result, indent=2))
     print(json.dumps(result, indent=2))
     return result
+
+
+def config_from_tuner_result(base_config: ExperimentConfig, result: dict) -> ExperimentConfig:
+    hp = result.get("best_hyperparameters") or {}
+    return ExperimentConfig(
+        **{
+            **asdict(base_config),
+            "task": result.get("task", base_config.task),
+            "model_family": result.get("model_family", base_config.model_family),
+            "sequence_length": int(result.get("sequence_length", base_config.sequence_length)),
+            "batch_size": int(result.get("best_batch_size", base_config.batch_size)),
+            "filters": int(hp.get("filters", base_config.filters)),
+            "kernel_size": int(hp.get("kernel_size", base_config.kernel_size)),
+            "dropout": float(hp.get("dropout", base_config.dropout)),
+            "learning_rate": float(hp.get("learning_rate", base_config.learning_rate)),
+            "dense_units": int(hp.get("dense_units", base_config.dense_units)),
+            "tuner": None,
+        }
+    )
+
+
+def train_from_tuner_result(base_config: ExperimentConfig, result_path: Path) -> dict:
+    if not result_path.exists():
+        raise SystemExit(f"Missing tuner result file: {result_path}")
+    result = json.loads(result_path.read_text())
+    tuned_config = config_from_tuner_result(base_config, result)
+    print("training best tuned configuration")
+    print(json.dumps(asdict(tuned_config), indent=2))
+    return train_once(tuned_config)
 
 
 def sequence_sweep(config: ExperimentConfig, lengths: list[int]) -> list[dict]:
@@ -646,6 +676,12 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--augment", action="store_true")
     parser.add_argument("--lr-schedule", choices=["plateau", "cosine"], default="cosine")
     parser.add_argument("--tune", action="store_true")
+    parser.add_argument("--tune-and-train-best", action="store_true")
+    parser.add_argument(
+        "--train-from-tuner-result",
+        default=None,
+        help="Train/evaluate the best config stored in reports/deep_learning_tuner_result.json or a provided path.",
+    )
     parser.add_argument("--tuner", choices=["random", "bayesian"], default="random")
     parser.add_argument("--max-trials", type=int, default=20)
     parser.add_argument("--max-train-rows", type=int, default=None)
@@ -713,8 +749,18 @@ def main(argv: Iterable[str] | None = None) -> int:
         print_memory_plan(lengths, len(args.array_columns))
         return 0
     config = config_from_args(args)
-    if args.tune:
-        tuner_search(config)
+    if args.train_from_tuner_result:
+        result_path = Path(args.train_from_tuner_result)
+        if not result_path.is_absolute():
+            result_path = ROOT / result_path
+        train_from_tuner_result(config, result_path)
+    elif args.tune:
+        result = tuner_search(config)
+        if args.tune_and_train_best:
+            tuned_config = config_from_tuner_result(config, result)
+            print("training best tuned configuration")
+            print(json.dumps(asdict(tuned_config), indent=2))
+            train_once(tuned_config)
     elif args.sweep_sequence_lengths:
         sequence_sweep(config, lengths)
     else:

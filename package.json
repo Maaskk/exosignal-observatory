@@ -16,7 +16,8 @@
     "train:deep": "./.venv/bin/python scripts/train_deep_learning.py",
     "train:deep:memory": "./.venv/bin/python scripts/train_deep_learning.py --print-memory-plan --sweep-sequence-lengths 512,1024,2048",
     "train:deep:smoke": "./.venv/bin/python scripts/train_deep_learning.py --smoke --max-train-rows 512 --max-val-rows 256 --max-test-rows 256",
-    "train:deep:tune": "./.venv/bin/python scripts/train_deep_learning.py --task binary --model-family hybrid --sequence-length 1024 --tune --tuner random --max-trials 24 --mixed-precision --augment --loss focal"
+    "train:deep:tune": "./.venv/bin/python scripts/train_deep_learning.py --task binary --model-family hybrid --sequence-length 1024 --tune --tuner random --max-trials 24 --mixed-precision --augment --loss focal",
+    "train:deep:tuned-best": "./.venv/bin/python scripts/train_deep_learning.py --task binary --model-family hybrid --sequence-length 1024 --epochs 40 --mixed-precision --augment --loss focal --train-from-tuner-result reports/deep_learning_tuner_result.json"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.1.1",
