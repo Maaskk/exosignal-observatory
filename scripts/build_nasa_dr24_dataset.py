@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import signal
 import shutil
 import time
 from datetime import datetime, timezone
@@ -57,6 +59,28 @@ LABEL_MAP = {
     "AFP": "FALSE_POSITIVE",
     "NTP": "NO_SIGNAL",
 }
+
+
+class TargetTimeoutError(TimeoutError):
+    pass
+
+
+@contextlib.contextmanager
+def target_timeout(seconds: int):
+    if seconds <= 0 or not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def _handler(signum, frame):
+        raise TargetTimeoutError(f"target download exceeded {seconds} seconds")
+
+    previous_handler = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def utc_now() -> str:
@@ -273,6 +297,7 @@ def build_lightcurve_dataset(
     max_rows: int | None,
     seed: int,
     keep_lightcurve_cache: bool,
+    target_timeout_seconds: int,
 ) -> tuple[pd.DataFrame, dict]:
     if max_rows and max_rows < len(labeled):
         labeled = labeled.sample(n=max_rows, random_state=seed).reset_index(drop=True)
@@ -281,10 +306,19 @@ def build_lightcurve_dataset(
     rows = []
     failures = []
     processed = 0
-    for kepid, group in labeled.groupby("kepid", sort=False):
+    groups = list(labeled.groupby("kepid", sort=False))
+    for group_index, (kepid, group) in enumerate(groups, start=1):
         target_cache_dir = cache_dir / str(int(kepid))
+        print(
+            f"target {group_index}/{len(groups)} KIC {int(kepid)} rows={len(group)} processed={processed} kept_rows={len(rows)}",
+            flush=True,
+        )
         try:
-            curve = download_kepler_light_curve(int(kepid), target_cache_dir)
+            with target_timeout(target_timeout_seconds):
+                curve = download_kepler_light_curve(int(kepid), target_cache_dir)
+        except TargetTimeoutError as exc:
+            curve = None
+            failures.append({"kepid": int(kepid), "reason": str(exc)})
         except Exception as exc:
             curve = None
             failures.append({"kepid": int(kepid), "reason": str(exc)})
@@ -327,6 +361,7 @@ def build_manifest(metadata: pd.DataFrame, labeled: pd.DataFrame, args: argparse
         "sequence_length": int(args.sequence_length),
         "lightcurves_downloaded": bool(args.download_lightcurves),
         "kept_lightcurve_cache": bool(args.keep_lightcurve_cache),
+        "target_timeout_seconds": int(args.target_timeout_seconds),
         "materialization": materialization or {},
         "notes": [
             "clean labels use av_training_set and exclude UNK",
@@ -342,6 +377,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-metadata-rows", type=int, default=None)
     parser.add_argument("--download-lightcurves", action="store_true")
     parser.add_argument("--keep-lightcurve-cache", action="store_true")
+    parser.add_argument("--target-timeout-seconds", type=int, default=180)
     parser.add_argument("--max-lightcurve-rows", type=int, default=None)
     parser.add_argument("--sequence-length", type=int, default=1024)
     parser.add_argument("--output-dir", type=Path, default=PROCESSED_DIR)
@@ -366,6 +402,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             max_rows=args.max_lightcurve_rows,
             seed=args.seed,
             keep_lightcurve_cache=args.keep_lightcurve_cache,
+            target_timeout_seconds=args.target_timeout_seconds,
         )
     manifest = build_manifest(metadata, labeled, args, materialization=materialization)
     manifest["elapsed_seconds"] = round(time.time() - start, 2)
