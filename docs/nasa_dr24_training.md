@@ -58,13 +58,17 @@ python scripts/train_deep_learning.py \
   --dataset-profile nasa-dr24 \
   --task binary \
   --model-family hybrid \
+  --backbone inceptiontime \
   --sequence-length 1024 \
   --epochs 40 \
   --batch-size 32 \
   --mixed-precision \
   --augment \
   --loss focal \
-  --lr-schedule cosine
+  --lr-schedule cosine \
+  --ensemble 3 \
+  --calibration isotonic \
+  --tta-runs 8
 ```
 
 Run the all-rows weak-label version when Colab disk/time allows:

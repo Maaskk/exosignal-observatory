@@ -20,6 +20,7 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
+from sklearn.isotonic import IsotonicRegression
 from sklearn.preprocessing import StandardScaler, label_binarize
 
 
@@ -58,6 +59,7 @@ class ExperimentConfig:
     dataset_profile: str
     task: str
     model_family: str
+    backbone: str
     sequence_length: int
     array_columns: list[str]
     epochs: int
@@ -71,6 +73,9 @@ class ExperimentConfig:
     mixed_precision: bool
     augment: bool
     lr_schedule: str
+    ensemble: int
+    calibration: str
+    tta_runs: int
     tuner: str | None
     max_trials: int
     max_train_rows: int | None
@@ -296,6 +301,61 @@ def residual_block(x, layers, filters: int, kernel_size: int, dropout: float, di
     return layers.Activation("relu")(y)
 
 
+def inception_module(x, layers, filters: int, dropout: float, kernel_sizes: tuple[int, int, int] = (9, 19, 39)):
+    shortcut = x
+    bottleneck = x
+    if int(x.shape[-1]) > 1:
+        bottleneck = layers.Conv1D(filters, 1, padding="same", use_bias=False)(x)
+        bottleneck = layers.BatchNormalization()(bottleneck)
+        bottleneck = layers.Activation("relu")(bottleneck)
+    branches = [layers.Conv1D(filters, size, padding="same", use_bias=False)(bottleneck) for size in kernel_sizes]
+    pool_branch = layers.MaxPooling1D(pool_size=3, strides=1, padding="same")(x)
+    pool_branch = layers.Conv1D(filters, 1, padding="same", use_bias=False)(pool_branch)
+    y = layers.Concatenate()(branches + [pool_branch])
+    y = layers.BatchNormalization()(y)
+    y = layers.Activation("relu")(y)
+    y = layers.Dropout(dropout)(y)
+    if shortcut.shape[-1] != y.shape[-1]:
+        shortcut = layers.Conv1D(int(y.shape[-1]), 1, padding="same", use_bias=False)(shortcut)
+    y = layers.Add()([shortcut, y])
+    return layers.Activation("relu")(y)
+
+
+def effective_backbone(config: ExperimentConfig) -> str:
+    if config.backbone != "auto":
+        return config.backbone
+    if config.model_family in {"residual", "attention", "tcn", "inceptiontime"}:
+        return config.model_family
+    return "attention"
+
+
+def sequence_features(sequence_input, layers, config: ExperimentConfig):
+    backbone = effective_backbone(config)
+    x = layers.Conv1D(config.filters, config.kernel_size, padding="same", use_bias=False)(sequence_input)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation("relu")(x)
+
+    if backbone == "inceptiontime":
+        for _ in range(3):
+            x = inception_module(x, layers, config.filters, config.dropout)
+    elif backbone == "tcn":
+        for dilation in [1, 2, 4, 8]:
+            x = residual_block(x, layers, config.filters, config.kernel_size, config.dropout, dilation_rate=dilation)
+    else:
+        x = residual_block(x, layers, config.filters, config.kernel_size, config.dropout)
+        x = layers.MaxPooling1D(2)(x)
+        x = residual_block(x, layers, config.filters * 2, max(3, config.kernel_size - 2), config.dropout)
+        x = layers.MaxPooling1D(2)(x)
+        x = residual_block(x, layers, config.filters * 4, 3, config.dropout)
+
+    if backbone == "attention":
+        attention = layers.MultiHeadAttention(num_heads=4, key_dim=max(8, config.filters // 2), dropout=config.dropout)(x, x)
+        x = layers.Add()([x, attention])
+        x = layers.LayerNormalization()(x)
+
+    return layers.GlobalAveragePooling1D()(x), backbone
+
+
 def output_layer(x, layers, task: str):
     if task == "binary":
         return layers.Dense(1, activation="sigmoid", dtype="float32", name="candidate_probability")(x)
@@ -333,30 +393,11 @@ def build_sequence_model(config: ExperimentConfig, feature_count: int | None = N
     tf, keras, layers = require_tensorflow(config.mixed_precision)
     tf.keras.utils.set_random_seed(config.seed)
     sequence_input = keras.Input(shape=(config.sequence_length, len(config.array_columns)), name="folded_light_curve")
-    x = layers.Conv1D(config.filters, config.kernel_size, padding="same", use_bias=False)(sequence_input)
-    x = layers.BatchNormalization()(x)
-    x = layers.Activation("relu")(x)
-
-    if config.model_family == "tcn":
-        for dilation in [1, 2, 4, 8]:
-            x = residual_block(x, layers, config.filters, config.kernel_size, config.dropout, dilation_rate=dilation)
-    else:
-        x = residual_block(x, layers, config.filters, config.kernel_size, config.dropout)
-        x = layers.MaxPooling1D(2)(x)
-        x = residual_block(x, layers, config.filters * 2, max(3, config.kernel_size - 2), config.dropout)
-        x = layers.MaxPooling1D(2)(x)
-        x = residual_block(x, layers, config.filters * 4, 3, config.dropout)
-
-    if config.model_family == "attention":
-        attention = layers.MultiHeadAttention(num_heads=4, key_dim=max(8, config.filters // 2), dropout=config.dropout)(x, x)
-        x = layers.Add()([x, attention])
-        x = layers.LayerNormalization()(x)
-
-    x = layers.GlobalAveragePooling1D()(x)
+    x, backbone = sequence_features(sequence_input, layers, config)
     x = layers.Dense(config.dense_units, activation="relu")(x)
     x = layers.Dropout(config.dropout)(x)
     outputs = output_layer(x, layers, config.task)
-    model = keras.Model(sequence_input, outputs, name=f"exosignal_{config.model_family}_{config.task}")
+    model = keras.Model(sequence_input, outputs, name=f"exosignal_{backbone}_{config.task}")
     return compile_model(model, keras, config, steps_per_epoch=1), keras
 
 
@@ -366,16 +407,7 @@ def build_hybrid_model(config: ExperimentConfig, feature_count: int):
     sequence_input = keras.Input(shape=(config.sequence_length, len(config.array_columns)), name="folded_light_curve")
     features_input = keras.Input(shape=(feature_count,), name="engineered_features")
 
-    x = layers.Conv1D(config.filters, config.kernel_size, padding="same", use_bias=False)(sequence_input)
-    x = layers.BatchNormalization()(x)
-    x = layers.Activation("relu")(x)
-    x = residual_block(x, layers, config.filters, config.kernel_size, config.dropout)
-    x = layers.MaxPooling1D(2)(x)
-    x = residual_block(x, layers, config.filters * 2, 5, config.dropout)
-    attention = layers.MultiHeadAttention(num_heads=4, key_dim=max(8, config.filters // 2), dropout=config.dropout)(x, x)
-    x = layers.Add()([x, attention])
-    x = layers.LayerNormalization()(x)
-    x = layers.GlobalAveragePooling1D()(x)
+    x, backbone = sequence_features(sequence_input, layers, config)
 
     f = layers.Dense(config.dense_units, activation="relu")(features_input)
     f = layers.BatchNormalization()(f)
@@ -386,7 +418,7 @@ def build_hybrid_model(config: ExperimentConfig, feature_count: int):
     joined = layers.Dense(config.dense_units, activation="relu")(joined)
     joined = layers.Dropout(config.dropout)(joined)
     outputs = output_layer(joined, layers, config.task)
-    model = keras.Model([sequence_input, features_input], outputs, name=f"exosignal_hybrid_{config.task}")
+    model = keras.Model([sequence_input, features_input], outputs, name=f"exosignal_hybrid_{backbone}_{config.task}")
     return compile_model(model, keras, config, steps_per_epoch=1), keras
 
 
@@ -438,6 +470,46 @@ def evaluate_multiclass(y_true: np.ndarray, probabilities: np.ndarray, class_lab
     }
 
 
+def model_inputs(config: ExperimentConfig, sequence: np.ndarray, features: np.ndarray):
+    if config.model_family == "hybrid":
+        return [sequence, features]
+    return sequence
+
+
+def predict_probabilities(
+    model,
+    sequence: np.ndarray,
+    features: np.ndarray,
+    config: ExperimentConfig,
+    batch_size: int,
+    seed: int,
+) -> np.ndarray:
+    base = model.predict(model_inputs(config, sequence, features), batch_size=batch_size, verbose=0)
+    if config.tta_runs <= 1:
+        return base
+    rng = np.random.default_rng(seed)
+    runs = [base]
+    for _ in range(config.tta_runs - 1):
+        augmented = np.asarray([augment_sequence(item, rng) for item in sequence], dtype=np.float32)
+        runs.append(model.predict(model_inputs(config, augmented, features), batch_size=batch_size, verbose=0))
+    return np.mean(np.stack(runs, axis=0), axis=0)
+
+
+def calibrate_binary_probabilities(
+    method: str,
+    y_val: np.ndarray,
+    val_probabilities: np.ndarray,
+    test_probabilities: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    if method == "none":
+        return val_probabilities, test_probabilities, {"method": "none"}
+    if method != "isotonic":
+        raise ValueError(f"Unsupported calibration method: {method}")
+    calibrator = IsotonicRegression(out_of_bounds="clip")
+    calibrator.fit(val_probabilities, y_val.astype(int))
+    return calibrator.predict(val_probabilities), calibrator.predict(test_probabilities), {"method": "isotonic"}
+
+
 def callbacks(keras, config: ExperimentConfig, output_dir: Path):
     output_dir.mkdir(parents=True, exist_ok=True)
     monitor = "val_pr_auc" if config.task == "binary" else "val_accuracy"
@@ -474,46 +546,73 @@ def train_once(config: ExperimentConfig) -> dict:
     y_val, _ = build_labels(val_df, config.task)
     y_test, _ = build_labels(test_df, config.task)
 
-    if config.model_family == "hybrid":
-        model, keras = build_hybrid_model(config, feature_count=x_train_features.shape[1])
-        train_inputs = [x_train_seq, x_train_features]
-        val_inputs = [x_val_seq, x_val_features]
-        test_inputs = [x_test_seq, x_test_features]
-    else:
-        model, keras = build_sequence_model(config, feature_count=x_train_features.shape[1])
-        train_inputs = x_train_seq
-        val_inputs = x_val_seq
-        test_inputs = x_test_seq
+    ensemble_count = max(1, int(config.ensemble))
+    val_probability_runs = []
+    test_probability_runs = []
+    histories = []
+    experiment_base = MODELS_DIR / "experiments" / f"{config.task}_{config.model_family}_{effective_backbone(config)}_{config.sequence_length}_{int(time.time())}"
+    saved_model_paths = []
+    for run_index in range(ensemble_count):
+        run_config = ExperimentConfig(**{**asdict(config), "seed": config.seed + run_index * 101})
+        run_train_seq = (
+            frame_to_tensor(train_df, config.sequence_length, config.array_columns, augment=True, seed=run_config.seed)
+            if config.augment and run_index > 0
+            else x_train_seq
+        )
+        if run_config.model_family == "hybrid":
+            model, keras = build_hybrid_model(run_config, feature_count=x_train_features.shape[1])
+        else:
+            model, keras = build_sequence_model(run_config, feature_count=x_train_features.shape[1])
+        train_inputs = model_inputs(run_config, run_train_seq, x_train_features)
+        val_inputs = model_inputs(run_config, x_val_seq, x_val_features)
+        experiment_dir = experiment_base / f"member_{run_index + 1}"
+        print(f"training ensemble member {run_index + 1}/{ensemble_count} seed={run_config.seed}")
+        history = model.fit(
+            train_inputs,
+            y_train,
+            validation_data=(val_inputs, y_val),
+            epochs=run_config.epochs,
+            batch_size=run_config.batch_size,
+            class_weight=class_weights(y_train, run_config.task),
+            callbacks=callbacks(keras, run_config, experiment_dir),
+            verbose=2,
+        )
+        histories.append({key: [float(x) for x in values] for key, values in history.history.items()})
+        member_path = experiment_dir / "member_model.keras"
+        model.save(member_path)
+        saved_model_paths.append(str(member_path.relative_to(ROOT)))
+        if run_index == 0:
+            model.save(MODEL_PATH)
+        val_probability_runs.append(
+            predict_probabilities(model, x_val_seq, x_val_features, run_config, run_config.batch_size, seed=run_config.seed + 17)
+        )
+        test_probability_runs.append(
+            predict_probabilities(model, x_test_seq, x_test_features, run_config, run_config.batch_size, seed=run_config.seed + 29)
+        )
 
-    experiment_dir = MODELS_DIR / "experiments" / f"{config.task}_{config.model_family}_{config.sequence_length}_{int(time.time())}"
-    history = model.fit(
-        train_inputs,
-        y_train,
-        validation_data=(val_inputs, y_val),
-        epochs=config.epochs,
-        batch_size=config.batch_size,
-        class_weight=class_weights(y_train, config.task),
-        callbacks=callbacks(keras, config, experiment_dir),
-        verbose=2,
-    )
-
-    val_probabilities = model.predict(val_inputs, batch_size=config.batch_size, verbose=0)
-    test_probabilities = model.predict(test_inputs, batch_size=config.batch_size, verbose=0)
+    val_probabilities = np.mean(np.stack(val_probability_runs, axis=0), axis=0)
+    test_probabilities = np.mean(np.stack(test_probability_runs, axis=0), axis=0)
     if config.task == "binary":
         val_probabilities = val_probabilities.ravel()
         test_probabilities = test_probabilities.ravel()
+        val_probabilities, test_probabilities, calibration_info = calibrate_binary_probabilities(
+            config.calibration, y_val, val_probabilities, test_probabilities
+        )
         threshold, validation_f1 = best_threshold(y_val, val_probabilities)
         metrics = evaluate_binary(y_test, test_probabilities, threshold, validation_f1)
     else:
+        calibration_info = {"method": "none"}
         metrics = evaluate_multiclass(y_test, test_probabilities, class_labels)
-
-    model.save(MODEL_PATH)
     metrics.update(
         {
             "model_name": f"{config.model_family} deep light-curve model",
             "task": config.task,
             "model_family": config.model_family,
+            "backbone": effective_backbone(config),
             "dataset_profile": config.dataset_profile,
+            "ensemble_members": ensemble_count,
+            "calibration": calibration_info,
+            "tta_runs": int(config.tta_runs),
             "training_rows": int(len(train_df)),
             "validation_rows": int(len(val_df)),
             "test_rows": int(len(test_df)),
@@ -522,14 +621,21 @@ def train_once(config: ExperimentConfig) -> dict:
             "engineered_feature_count": int(len(feature_columns)),
             "estimated_tensor_memory_mb": estimate_tensor_memory_mb(len(train_df) + len(val_df) + len(test_df), config.sequence_length, len(config.array_columns), copies=1),
             "elapsed_seconds": round(time.time() - start, 2),
-            "history": {key: [float(x) for x in values] for key, values in history.history.items()},
+            "history": histories[0] if histories else {},
+            "ensemble_histories": histories,
+            "ensemble_model_paths": saved_model_paths,
             "config": asdict(config),
         }
     )
     model_config = {
         "model_type": f"keras_{config.model_family}",
         "model_path": str(MODEL_PATH.relative_to(ROOT)),
+        "backbone": effective_backbone(config),
         "dataset_profile": config.dataset_profile,
+        "ensemble_model_paths": saved_model_paths,
+        "ensemble_members": ensemble_count,
+        "calibration": calibration_info,
+        "tta_runs": int(config.tta_runs),
         "task": config.task,
         "class_labels": class_labels,
         "sequence_length": int(config.sequence_length),
@@ -682,7 +788,13 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         help="Data source profile: official/hf/default for data/*.parquet, nasa-dr24 for data/nasa_dr24_tce/processed, or a custom directory.",
     )
     parser.add_argument("--task", choices=["binary", "multiclass"], default="binary")
-    parser.add_argument("--model-family", choices=["residual", "attention", "tcn", "hybrid"], default="hybrid")
+    parser.add_argument("--model-family", choices=["residual", "attention", "tcn", "inceptiontime", "hybrid"], default="hybrid")
+    parser.add_argument(
+        "--backbone",
+        choices=["auto", "residual", "attention", "tcn", "inceptiontime"],
+        default="auto",
+        help="Sequence backbone. Use --model-family hybrid --backbone inceptiontime for a hybrid InceptionTime model.",
+    )
     parser.add_argument("--sequence-length", type=int, default=1024)
     parser.add_argument("--sweep-sequence-lengths", type=parse_csv, default=None)
     parser.add_argument("--array-columns", type=parse_csv, default=ARRAY_COLUMNS)
@@ -697,6 +809,9 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--mixed-precision", action="store_true")
     parser.add_argument("--augment", action="store_true")
     parser.add_argument("--lr-schedule", choices=["plateau", "cosine"], default="cosine")
+    parser.add_argument("--ensemble", type=int, default=1)
+    parser.add_argument("--calibration", choices=["none", "isotonic"], default="none")
+    parser.add_argument("--tta-runs", type=int, default=1)
     parser.add_argument("--tune", action="store_true")
     parser.add_argument("--tune-and-train-best", action="store_true")
     parser.add_argument(
@@ -723,10 +838,13 @@ def config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         args.max_val_rows = args.max_val_rows or 256
         args.max_test_rows = args.max_test_rows or 256
         args.sequence_length = min(args.sequence_length, 512)
+        args.ensemble = 1
+        args.tta_runs = 1
     return ExperimentConfig(
         dataset_profile=args.dataset_profile,
         task=args.task,
         model_family=args.model_family,
+        backbone=args.backbone,
         sequence_length=args.sequence_length,
         array_columns=list(args.array_columns),
         epochs=args.epochs,
@@ -740,6 +858,9 @@ def config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         mixed_precision=args.mixed_precision,
         augment=args.augment,
         lr_schedule=args.lr_schedule,
+        ensemble=max(1, args.ensemble),
+        calibration=args.calibration,
+        tta_runs=max(1, args.tta_runs),
         tuner=args.tuner if args.tune else None,
         max_trials=args.max_trials,
         max_train_rows=args.max_train_rows,
