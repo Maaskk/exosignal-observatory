@@ -7,3 +7,4 @@ numpy>=1.26
 requests>=2.31
 astropy>=6.0
 lightkurve>=2.5
+gdown>=5.2

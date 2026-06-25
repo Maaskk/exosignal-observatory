@@ -12,6 +12,10 @@ class DeepLearningDatasetProfileTest(unittest.TestCase):
         expected = DATA_DIR / "nasa_dr24_tce" / "processed" / "train.parquet"
         self.assertEqual(dataset_split_path("nasa-dr24", "train"), expected)
 
+    def test_astronet_dr24_profile_uses_processed_astronet_parquets(self):
+        expected = DATA_DIR / "astronet_dr24" / "processed" / "train.parquet"
+        self.assertEqual(dataset_split_path("astronet-dr24", "train"), expected)
+
     def test_custom_profile_path_can_point_to_any_processed_dataset(self):
         custom = Path("/tmp/exosignal_custom")
         self.assertEqual(dataset_split_path(str(custom), "val"), custom / "val.parquet")

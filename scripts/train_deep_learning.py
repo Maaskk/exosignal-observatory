@@ -27,6 +27,7 @@ from sklearn.preprocessing import StandardScaler, label_binarize
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
 DR24_PROCESSED_DIR = DATA_DIR / "nasa_dr24_tce" / "processed"
+ASTRONET_DR24_PROCESSED_DIR = DATA_DIR / "astronet_dr24" / "processed"
 MODELS_DIR = ROOT / "models"
 REPORTS_DIR = ROOT / "reports"
 MODEL_PATH = MODELS_DIR / "deep_lightcurve_cnn.keras"
@@ -206,6 +207,8 @@ def dataset_split_path(dataset_profile: str, name: str) -> Path:
         return DATA_DIR / f"{name}.parquet"
     if dataset_profile in {"nasa-dr24", "dr24"}:
         return DR24_PROCESSED_DIR / f"{name}.parquet"
+    if dataset_profile in {"astronet-dr24", "astronet", "google-astronet"}:
+        return ASTRONET_DR24_PROCESSED_DIR / f"{name}.parquet"
     return Path(dataset_profile).expanduser() / f"{name}.parquet"
 
 
@@ -216,6 +219,11 @@ def load_split(name: str, max_rows: int | None, seed: int, dataset_profile: str 
             raise FileNotFoundError(
                 f"Missing {path}. Build it first with: "
                 "python scripts/build_nasa_dr24_dataset.py --label-source predicted --download-lightcurves"
+            )
+        if dataset_profile in {"astronet-dr24", "astronet", "google-astronet"}:
+            raise FileNotFoundError(
+                f"Missing {path}. Build it first with: "
+                "python scripts/build_astronet_dr24_dataset.py --download"
             )
         raise FileNotFoundError(f"Missing {path}. Run npm run download:data:full first.")
     df = pd.read_parquet(path)
@@ -785,7 +793,11 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--dataset-profile",
         default="official",
-        help="Data source profile: official/hf/default for data/*.parquet, nasa-dr24 for data/nasa_dr24_tce/processed, or a custom directory.",
+        help=(
+            "Data source profile: official/hf/default for data/*.parquet, nasa-dr24 for "
+            "data/nasa_dr24_tce/processed, astronet-dr24 for precomputed AstroNet DR24 "
+            "TFRecord views, or a custom directory."
+        ),
     )
     parser.add_argument("--task", choices=["binary", "multiclass"], default="binary")
     parser.add_argument("--model-family", choices=["residual", "attention", "tcn", "inceptiontime", "hybrid"], default="hybrid")
