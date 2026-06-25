@@ -298,6 +298,7 @@ def build_lightcurve_dataset(
     seed: int,
     keep_lightcurve_cache: bool,
     target_timeout_seconds: int,
+    checkpoint_rows: int,
 ) -> tuple[pd.DataFrame, dict]:
     if max_rows and max_rows < len(labeled):
         labeled = labeled.sample(n=max_rows, random_state=seed).reset_index(drop=True)
@@ -306,6 +307,8 @@ def build_lightcurve_dataset(
     rows = []
     failures = []
     processed = 0
+    last_checkpoint_rows = 0
+    split_summary = {}
     groups = list(labeled.groupby("kepid", sort=False))
     for group_index, (kepid, group) in enumerate(groups, start=1):
         target_cache_dir = cache_dir / str(int(kepid))
@@ -331,10 +334,14 @@ def build_lightcurve_dataset(
             rows.append(materialized)
         if not keep_lightcurve_cache:
             shutil.rmtree(target_cache_dir, ignore_errors=True)
+        if checkpoint_rows > 0 and len(rows) - last_checkpoint_rows >= checkpoint_rows:
+            split_summary = write_split_parquets(pd.DataFrame(rows), output_dir, seed=seed)
+            last_checkpoint_rows = len(rows)
+            print(f"checkpoint wrote {len(rows)} rows to {output_dir}", flush=True)
         if processed % 50 == 0 or processed >= len(labeled):
             print(f"materialized {len(rows)} rows from {processed} TCE rows; failures={len(failures)}", flush=True)
     dataset = pd.DataFrame(rows)
-    split_summary = write_split_parquets(dataset, output_dir, seed=seed) if len(dataset) else {}
+    split_summary = write_split_parquets(dataset, output_dir, seed=seed) if len(dataset) else split_summary
     return dataset, {"materialized_rows": int(len(dataset)), "failures": failures[:50], "split_summary": split_summary}
 
 
@@ -362,6 +369,7 @@ def build_manifest(metadata: pd.DataFrame, labeled: pd.DataFrame, args: argparse
         "lightcurves_downloaded": bool(args.download_lightcurves),
         "kept_lightcurve_cache": bool(args.keep_lightcurve_cache),
         "target_timeout_seconds": int(args.target_timeout_seconds),
+        "checkpoint_rows": int(args.checkpoint_rows),
         "materialization": materialization or {},
         "notes": [
             "clean labels use av_training_set and exclude UNK",
@@ -378,6 +386,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--download-lightcurves", action="store_true")
     parser.add_argument("--keep-lightcurve-cache", action="store_true")
     parser.add_argument("--target-timeout-seconds", type=int, default=180)
+    parser.add_argument("--checkpoint-rows", type=int, default=50)
     parser.add_argument("--max-lightcurve-rows", type=int, default=None)
     parser.add_argument("--sequence-length", type=int, default=1024)
     parser.add_argument("--output-dir", type=Path, default=PROCESSED_DIR)
@@ -403,6 +412,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             seed=args.seed,
             keep_lightcurve_cache=args.keep_lightcurve_cache,
             target_timeout_seconds=args.target_timeout_seconds,
+            checkpoint_rows=args.checkpoint_rows,
         )
     manifest = build_manifest(metadata, labeled, args, materialization=materialization)
     manifest["elapsed_seconds"] = round(time.time() - start, 2)
