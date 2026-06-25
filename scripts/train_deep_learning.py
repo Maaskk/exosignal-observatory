@@ -25,6 +25,7 @@ from sklearn.preprocessing import StandardScaler, label_binarize
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
+DR24_PROCESSED_DIR = DATA_DIR / "nasa_dr24_tce" / "processed"
 MODELS_DIR = ROOT / "models"
 REPORTS_DIR = ROOT / "reports"
 MODEL_PATH = MODELS_DIR / "deep_lightcurve_cnn.keras"
@@ -54,6 +55,7 @@ METADATA_COLUMNS = [
 
 @dataclass
 class ExperimentConfig:
+    dataset_profile: str
     task: str
     model_family: str
     sequence_length: int
@@ -194,9 +196,22 @@ def fit_feature_matrix(train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd
     return x_train, x_val, x_test, columns
 
 
-def load_split(name: str, max_rows: int | None, seed: int) -> pd.DataFrame:
-    path = DATA_DIR / f"{name}.parquet"
+def dataset_split_path(dataset_profile: str, name: str) -> Path:
+    if dataset_profile in {"official", "hf", "default"}:
+        return DATA_DIR / f"{name}.parquet"
+    if dataset_profile in {"nasa-dr24", "dr24"}:
+        return DR24_PROCESSED_DIR / f"{name}.parquet"
+    return Path(dataset_profile).expanduser() / f"{name}.parquet"
+
+
+def load_split(name: str, max_rows: int | None, seed: int, dataset_profile: str = "official") -> pd.DataFrame:
+    path = dataset_split_path(dataset_profile, name)
     if not path.exists():
+        if dataset_profile in {"nasa-dr24", "dr24"}:
+            raise FileNotFoundError(
+                f"Missing {path}. Build it first with: "
+                "python scripts/build_nasa_dr24_dataset.py --label-source predicted --download-lightcurves"
+            )
         raise FileNotFoundError(f"Missing {path}. Run npm run download:data:full first.")
     df = pd.read_parquet(path)
     df = df[df["disposition"].isin(VALID_CLASSES)].copy()
@@ -447,9 +462,9 @@ def train_once(config: ExperimentConfig) -> dict:
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    train_df = load_split("train", config.max_train_rows, config.seed)
-    val_df = load_split("val", config.max_val_rows, config.seed + 1)
-    test_df = load_split("test", config.max_test_rows, config.seed + 2)
+    train_df = load_split("train", config.max_train_rows, config.seed, config.dataset_profile)
+    val_df = load_split("val", config.max_val_rows, config.seed + 1, config.dataset_profile)
+    test_df = load_split("test", config.max_test_rows, config.seed + 2, config.dataset_profile)
 
     x_train_seq = frame_to_tensor(train_df, config.sequence_length, config.array_columns, augment=config.augment, seed=config.seed)
     x_val_seq = frame_to_tensor(val_df, config.sequence_length, config.array_columns)
@@ -498,6 +513,7 @@ def train_once(config: ExperimentConfig) -> dict:
             "model_name": f"{config.model_family} deep light-curve model",
             "task": config.task,
             "model_family": config.model_family,
+            "dataset_profile": config.dataset_profile,
             "training_rows": int(len(train_df)),
             "validation_rows": int(len(val_df)),
             "test_rows": int(len(test_df)),
@@ -513,6 +529,7 @@ def train_once(config: ExperimentConfig) -> dict:
     model_config = {
         "model_type": f"keras_{config.model_family}",
         "model_path": str(MODEL_PATH.relative_to(ROOT)),
+        "dataset_profile": config.dataset_profile,
         "task": config.task,
         "class_labels": class_labels,
         "sequence_length": int(config.sequence_length),
@@ -544,8 +561,8 @@ def tuner_search(config: ExperimentConfig) -> dict:
     except Exception as exc:
         raise SystemExit("KerasTuner is not installed. Run: pip install keras-tuner") from exc
     tf, keras, layers = require_tensorflow(config.mixed_precision)
-    train_df = load_split("train", config.max_train_rows, config.seed)
-    val_df = load_split("val", config.max_val_rows, config.seed + 1)
+    train_df = load_split("train", config.max_train_rows, config.seed, config.dataset_profile)
+    val_df = load_split("val", config.max_val_rows, config.seed + 1, config.dataset_profile)
     x_train_seq = frame_to_tensor(train_df, config.sequence_length, config.array_columns, augment=config.augment, seed=config.seed)
     x_val_seq = frame_to_tensor(val_df, config.sequence_length, config.array_columns)
     x_train_features, x_val_features, _, feature_columns = fit_feature_matrix(train_df, val_df, val_df)
@@ -659,6 +676,11 @@ def sequence_sweep(config: ExperimentConfig, lengths: list[int]) -> list[dict]:
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run ExoSignal deep-learning experiments on Kepler/K2/TESS light curves.")
+    parser.add_argument(
+        "--dataset-profile",
+        default="official",
+        help="Data source profile: official/hf/default for data/*.parquet, nasa-dr24 for data/nasa_dr24_tce/processed, or a custom directory.",
+    )
     parser.add_argument("--task", choices=["binary", "multiclass"], default="binary")
     parser.add_argument("--model-family", choices=["residual", "attention", "tcn", "hybrid"], default="hybrid")
     parser.add_argument("--sequence-length", type=int, default=1024)
@@ -702,6 +724,7 @@ def config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         args.max_test_rows = args.max_test_rows or 256
         args.sequence_length = min(args.sequence_length, 512)
     return ExperimentConfig(
+        dataset_profile=args.dataset_profile,
         task=args.task,
         model_family=args.model_family,
         sequence_length=args.sequence_length,

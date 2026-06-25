@@ -12,6 +12,7 @@ data/metadata.csv
 data/*.csv
 data/**/*.csv
 data/*.jsonl
+data/nasa_dr24_tce/
 data/*.fits
 data/*.fit
 data/*.fts
