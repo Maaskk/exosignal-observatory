@@ -29,3 +29,5 @@ deliverables/
 !data/.gitkeep
 !models/.gitkeep
 !models/*.json
+
+data/astronet_dr24/
