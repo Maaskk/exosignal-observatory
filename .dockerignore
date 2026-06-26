@@ -1,0 +1,8 @@
+.git
+.venv
+node_modules
+data/astronet_dr24
+uploads
+*.zip
+__pycache__
+*.pyc

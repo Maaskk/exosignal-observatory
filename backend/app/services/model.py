@@ -259,7 +259,29 @@ def bridge_live_curve_features(features: dict[str, Any]) -> dict[str, Any]:
     return bridged
 
 
-def predict_candidate(features: dict[str, Any], cleaned_flux: np.ndarray | list[float] | None = None) -> dict[str, Any]:
+def predict_candidate(
+    features: dict[str, Any],
+    cleaned_flux: np.ndarray | list[float] | None = None,
+    time: np.ndarray | list[float] | None = None,
+) -> dict[str, Any]:
+    # Prefer the final T4 ensemble when all serving artifacts are available.
+    if time is not None and cleaned_flux is not None:
+        from backend.app.services.t4_ensemble import score_t4_candidate
+        t4 = score_t4_candidate(time, cleaned_flux, features)
+        if t4.get("used"):
+            probability = float(t4["candidate_probability"])
+            return {
+                "candidate_probability": probability,
+                "source": t4["source"],
+                "label": t4["label"],
+                "caution": "This model prioritizes candidates; it does not officially confirm an exoplanet.",
+                "t4_ensemble": {
+                    "raw_probability": t4["raw_ensemble_probability"],
+                    "threshold": t4["threshold"],
+                    "note": t4["note"],
+                },
+            }
+
     model = load_model()
     columns = load_feature_columns()
     model_features = bridge_live_curve_features(features)

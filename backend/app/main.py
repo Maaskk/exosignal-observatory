@@ -19,6 +19,7 @@ from backend.app.services.lightcurve import (
     parse_fits_light_curve,
 )
 from backend.app.services.model import active_model_status, deep_model_status, load_metrics, predict_candidate
+from backend.app.services.t4_ensemble import t4_model_status
 
 
 app = FastAPI(
@@ -100,18 +101,42 @@ def dataset_status():
 
 @app.get("/api/model")
 def model_status():
+    t4 = t4_model_status()
+    legacy_baseline = active_model_status()
+    legacy_deep = deep_model_status()
+
+    if t4.get("ready"):
+        active = {
+            "name": "Final T4 DR24 residual ensemble",
+            "family": "three-model deep-learning ensemble",
+            "artifact": [
+                "models/t4_optimized/seed_21_best.keras",
+                "models/t4_optimized/seed_37_best.keras",
+                "models/t4_optimized/seed_53_best.keras",
+            ],
+            "threshold": t4.get("threshold"),
+            "metrics": t4.get("metrics"),
+            "status": "active for periodic CSV/FITS uploads",
+            "note": (
+                "Uploaded curves are converted into approximate phase-folded views. "
+                "The published DR24 metrics apply to the held-out AstroNet test protocol."
+            ),
+        }
+        primary_metrics = t4.get("metrics")
+    else:
+        active = legacy_baseline
+        primary_metrics = load_metrics()
+
     return {
-        "trained": MODEL_PATH.exists(),
-        "model_path": str(MODEL_PATH.relative_to(ROOT_DIR)),
-        "deep_trained": DEEP_MODEL_PATH.exists(),
-        "deep_metrics_available": DEEP_METRICS_PATH.exists(),
-        "deep_model_path": str(DEEP_MODEL_PATH.relative_to(ROOT_DIR)),
-        "active_model": active_model_status(),
-        "deep_learning": deep_model_status(),
-        "metrics": load_metrics(),
+        "active_model": active,
+        "t4_ensemble": t4,
+        "legacy_models": {
+            "baseline": legacy_baseline,
+            "older_deep_learning": legacy_deep,
+        },
+        "metrics": primary_metrics,
         "training_status": json.loads(STATUS_PATH.read_text()) if STATUS_PATH.exists() else None,
     }
-
 
 def _run_training(max_rows: int | None = None):
     cmd = [str(ROOT_DIR / ".venv" / "bin" / "python"), str(ROOT_DIR / "scripts" / "train_model.py")]
@@ -148,7 +173,7 @@ def train(background_tasks: BackgroundTasks, max_rows: int | None = 6000):
 
 def _analysis_payload(time, raw_flux, name: str):
     analysis = analyze_light_curve(time, raw_flux)
-    prediction = predict_candidate(analysis.features, cleaned_flux=analysis.cleaned_flux)
+    prediction = predict_candidate(analysis.features, cleaned_flux=analysis.cleaned_flux, time=analysis.time)
     return {
         "target_name": name,
         "raw_curve": downsample_curve(analysis.time, analysis.raw_flux),

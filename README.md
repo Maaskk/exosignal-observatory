@@ -49,3 +49,6 @@ Open `http://127.0.0.1:5173`.
 ## Scope
 
 The application ranks transit-like signals for review. It does not confirm the existence of an exoplanet.
+## Final T4 serving
+
+The production API can serve the three-model T4 ensemble through Docker. It requires `models/t4_optimized/calibrator.joblib`; see `docs/DEPLOYMENT.md`. Uploaded curves must contain enough periodic information for phase folding.
