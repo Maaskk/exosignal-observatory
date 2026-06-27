@@ -479,7 +479,7 @@ function uploadAnalysis(file, onProgress) {
 
 async function fetchExoplanets() {
   const query = [
-    'select top 1200 pl_name,hostname,ra,dec,pl_orbper,pl_orbsmax,pl_orbeccen,pl_rade,pl_bmasse,sy_dist,disc_year,disc_facility,discoverymethod,st_teff,st_rad,st_lum,st_spectype',
+    'select pl_name,hostname,ra,dec,pl_orbper,pl_orbsmax,pl_orbeccen,pl_rade,pl_bmasse,sy_dist,disc_year,disc_facility,discoverymethod,st_teff,st_rad,st_lum,st_spectype',
     'from ps',
     'where default_flag=1 and ra is not null and dec is not null',
     'order by disc_year desc'
@@ -497,7 +497,7 @@ async function fetchExoplanets() {
       // Try the next endpoint before falling back to the bundled archive-scale demo sky.
     }
   }
-  return { planets: fallbackPlanets, live: false }
+  return { planets: expandedFallbackCatalog(6298), live: false }
 }
 
 async function fetchMastProducts(identifier) {
@@ -1580,25 +1580,41 @@ function NasaSystemInstrument({ planet, systemPlanets }) {
   )
 }
 
-function NasaEyesExperience({ planet }) {
-  const fullUrl = sourceLinks(planet).find((link) => link.label === 'NASA ARCHIVE')?.href || nasaEyesUrl(planet, false)
+function NasaEyesExperience({ planet, systemPlanets }) {
+  const [viewerReady, setViewerReady] = useState(false)
+  const src = nasaEyesUrl(planet, true)
+  const fullUrl = nasaEyesUrl(planet, false)
+  useEffect(() => {
+    setViewerReady(false)
+  }, [src])
   return (
-    <section className="nasa-eyes" style={{ padding: 18 }}>
-      <div className="nasa-eyes-toolbar">
-        <strong>SELECTED NASA ARCHIVE WORLD</strong>
-        <a href={fullUrl} target="_blank" rel="noreferrer">OPEN NASA ARCHIVE</a>
+    <section className="nasa-eyes-card">
+      <div className="nasa-eyes-head">
+        <span>NASA EYES ON EXOPLANETS</span>
+        <a href={fullUrl} target="_blank" rel="noreferrer">OPEN LIVE NASA VIEW <ExternalLink size={13} /></a>
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: '132px 1fr', gap: 18, alignItems: 'center', minHeight: 210 }}>
-        <div aria-hidden="true" style={{ width: 128, height: 128, borderRadius: '50%', background: 'radial-gradient(circle at 32% 28%,#eef8ff,#85aee0 18%,#315b91 50%,#081426 76%)', boxShadow: '0 0 46px rgba(116,184,255,.4)' }} />
-        <div>
-          <h3 style={{ margin: '0 0 8px' }}>{planet?.pl_name || 'Selected catalog world'}</h3>
-          <p>{planet?.hostname || 'Host star unavailable'} · {planetKind(planet)} · {fmt(planet?.pl_orbper, 3)} D orbit</p>
-          <p>This profile appears instantly. Open the selected world in the official NASA Exoplanet Archive when you need the full record.</p>
+      <div className="nasa-eyes-grid">
+        <div className="nasa-iframe-shell">
+          {!viewerReady && <div className="nasa-loading">LOADING NASA 3D VIEW</div>}
+          <iframe
+            key={src}
+            src={src}
+            title={`NASA Eyes on Exoplanets - ${planet?.pl_name || 'catalog'}`}
+            loading="lazy"
+            allow="fullscreen; xr-spatial-tracking"
+            allowFullScreen
+            referrerPolicy="strict-origin-when-cross-origin"
+            onLoad={() => setViewerReady(true)}
+          />
         </div>
+        <aside className="nasa-companion">
+          <NasaSystemInstrument planet={planet} systemPlanets={systemPlanets} />
+        </aside>
       </div>
     </section>
   )
 }
+
 function StarMapCanvas({ planets, selected, onSelect }) {
   const canvasRef = useRef(null)
   const [tooltip, setTooltip] = useState(null)
