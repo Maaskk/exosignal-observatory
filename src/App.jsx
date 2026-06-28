@@ -1620,78 +1620,37 @@ function NasaSystemInstrument({ planet, systemPlanets }) {
   )
 }
 
-function NasaEyesExperience({ planet }) {
-  const [viewerOpen, setViewerOpen] = useState(false)
+function NasaEyesExperience({ planet, systemPlanets }) {
   const [viewerReady, setViewerReady] = useState(false)
   const src = nasaEyesUrl(planet, true)
   const fullUrl = nasaEyesUrl(planet, false)
-
   useEffect(() => {
-    setViewerOpen(false)
     setViewerReady(false)
   }, [src])
-
   return (
-    <section className="nasa-eyes">
-      <div className="nasa-eyes-header">
-        <strong>NASA EYES ON EXOPLANETS</strong>
-        <a href={fullUrl} target="_blank" rel="noreferrer">
-          OPEN LIVE NASA VIEW <ExternalLink size={14} />
-        </a>
+    <section className="nasa-eyes-card">
+      <div className="nasa-eyes-head">
+        <span>NASA EYES ON EXOPLANETS</span>
+        <a href={fullUrl} target="_blank" rel="noreferrer">OPEN LIVE NASA VIEW <ExternalLink size={13} /></a>
       </div>
-
-      {viewerOpen ? (
-        <>
-          {!viewerReady && <div className="nasa-loader">LOADING NASA 3D VIEW</div>}
+      <div className="nasa-eyes-grid">
+        <div className="nasa-iframe-shell">
+          {!viewerReady && <div className="nasa-loading">LOADING NASA 3D VIEW</div>}
           <iframe
-            title={`NASA Eyes - ${planet?.pl_name || 'exoplanet'}`}
+            key={src}
             src={src}
+            title={`NASA Eyes on Exoplanets - ${planet?.pl_name || 'catalog'}`}
+            loading="lazy"
+            allow="fullscreen; xr-spatial-tracking"
+            allowFullScreen
+            referrerPolicy="strict-origin-when-cross-origin"
             onLoad={() => setViewerReady(true)}
           />
-          <button type="button" onClick={() => setViewerOpen(false)} style={{ marginTop: 10 }}>
-            CLOSE NASA 3D VIEW
-          </button>
-        </>
-      ) : (
-        <div
-          style={{
-            minHeight: 260,
-            display: 'grid',
-            gridTemplateColumns: '150px minmax(0, 1fr)',
-            gap: 24,
-            alignItems: 'center',
-            padding: 20,
-            background: 'radial-gradient(circle at 25% 38%, rgba(116,184,255,0.26), transparent 32%), linear-gradient(135deg, #04152e, #071d3f)',
-          }}
-        >
-          <div
-            aria-hidden="true"
-            style={{
-              width: 132,
-              height: 132,
-              borderRadius: '50%',
-              justifySelf: 'center',
-              background: 'radial-gradient(circle at 31% 26%, #ffffff 0%, #a9ccff 17%, #416fbd 50%, #10213d 76%)',
-              boxShadow: '0 0 0 14px rgba(143,215,255,0.06), 0 0 48px rgba(116,184,255,0.34)',
-            }}
-          />
-          <div>
-            <div style={{ color: '#9fc7ff', fontSize: 12, letterSpacing: '0.1em', marginBottom: 8 }}>
-              SELECTED NASA ARCHIVE WORLD
-            </div>
-            <h3 style={{ margin: 0, fontSize: 30 }}>{planet?.pl_name || 'Selected planet'}</h3>
-            <p style={{ color: '#d8e8f7', margin: '12px 0 18px', lineHeight: 1.6 }}>
-              {planet?.hostname || 'Host star unavailable'} - {planetKind(planet)} - {fmt(planet?.pl_orbper, 3)} D orbit
-            </p>
-            <button type="button" onClick={() => setViewerOpen(true)}>
-              LAUNCH NASA 3D VIEW
-            </button>
-            <p style={{ color: '#8fa9c4', margin: '12px 0 0', fontSize: 13, lineHeight: 1.5 }}>
-              The selected planet profile opens instantly. NASA's interactive 3D viewer loads only when requested.
-            </p>
-          </div>
         </div>
-      )}
+        <aside className="nasa-companion">
+          <NasaSystemInstrument planet={planet} systemPlanets={systemPlanets} />
+        </aside>
+      </div>
     </section>
   )
 }
