@@ -477,27 +477,65 @@ function uploadAnalysis(file, onProgress) {
   })
 }
 
+const EXOPLANET_CATALOG_CACHE_KEY = 'exosignal:nasa-catalog:v1'
+const EXOPLANET_CATALOG_CACHE_TTL = 24 * 60 * 60 * 1000
+function readExoplanetCatalogCache() {
+  try {
+    const raw = window.localStorage.getItem(EXOPLANET_CATALOG_CACHE_KEY)
+    if (!raw) return null
+    const saved = JSON.parse(raw)
+    if (!saved?.savedAt || !Array.isArray(saved?.planets)) return null
+    if (Date.now() - saved.savedAt > EXOPLANET_CATALOG_CACHE_TTL) return null
+    return saved.planets
+  } catch {
+    return null
+  }
+}
+function writeExoplanetCatalogCache(planets) {
+  try {
+    window.localStorage.setItem(EXOPLANET_CATALOG_CACHE_KEY, JSON.stringify({ savedAt: Date.now(), planets }))
+  } catch {
+    // Cache storage is optional; the live catalog remains available.
+  }
+}
+async function fetchJsonWithTimeout(url, timeoutMs = 18000) {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(url, { signal: controller.signal })
+    return await readJson(response)
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
 async function fetchExoplanets() {
+  const cached = readExoplanetCatalogCache()
+  if (cached?.length) return { planets: cached, live: true, cached: true }
+
   const query = [
     'select pl_name,hostname,ra,dec,pl_orbper,pl_orbsmax,pl_orbeccen,pl_rade,pl_bmasse,sy_dist,disc_year,disc_facility,discoverymethod,st_teff,st_rad,st_lum,st_spectype',
     'from ps',
     'where default_flag=1 and ra is not null and dec is not null',
-    'order by disc_year desc'
+    'order by disc_year desc',
   ].join(' ')
+
   const params = `query=${encodeURIComponent(query)}&format=json`
   const urls = [`${NASA_TAP_PROXY_URL}?${params}`, `${NASA_TAP_URL}?${params}`]
+
   for (const url of urls) {
     try {
-      const response = await fetch(url)
-      if (!response.ok) continue
-      const planets = await readJson(response)
+      const planets = await fetchJsonWithTimeout(url)
       const clean = planets.filter((planet) => Number.isFinite(Number(planet.ra)) && Number.isFinite(Number(planet.dec)))
-      if (clean.length) return { planets: clean, live: true }
+      if (clean.length) {
+        writeExoplanetCatalogCache(clean)
+        return { planets: clean, live: true, cached: false }
+      }
     } catch {
-      // Try the next endpoint before falling back to the bundled archive-scale demo sky.
+      // Try the next endpoint before using the bundled emergency catalog.
     }
   }
-  return { planets: expandedFallbackCatalog(6298), live: false }
+
+  return { planets: expandedFallbackCatalog(6298), live: false, cached: false }
 }
 
 async function fetchMastProducts(identifier) {
@@ -1580,7 +1618,78 @@ function NasaSystemInstrument({ planet, systemPlanets }) {
   )
 }
 
-function NasaEyesExperience({ planet, systemPlanets }) {
+function NasaEyesExperience({ planet }) {
+  const [viewerOpen, setViewerOpen] = useState(false)
+  const [viewerReady, setViewerReady] = useState(false)
+  const src = nasaEyesUrl(planet, true)
+  const fullUrl = nasaEyesUrl(planet, false)
+
+  useEffect(() => {
+    setViewerOpen(false)
+    setViewerReady(false)
+  }, [src])
+
+  return (
+    <section className="nasa-eyes">
+      <div className="nasa-eyes-header">
+        <strong>NASA EYES ON EXOPLANETS</strong>
+        <a href={fullUrl} target="_blank" rel="noreferrer">
+          OPEN LIVE NASA VIEW <ExternalLink size={14} />
+        </a>
+      </div>
+
+      {viewerOpen ? (
+        <>
+          {!viewerReady && <div className="nasa-loader">LOADING NASA 3D VIEW</div>}
+          <iframe
+            title={`NASA Eyes - ${planet?.pl_name || 'exoplanet'}`}
+            src={src}
+            onLoad={() => setViewerReady(true)}
+          />
+          <button
+            type="button"
+            onClick={() => setViewerOpen(false)}
+            style={{ marginTop: 10 }}
+          >
+            CLOSE NASA 3D VIEW
+          </button>
+        </>
+      ) : (
+        <div style={{
+          minHeight: 260,
+          display: 'grid',
+          gridTemplateColumns: '150px minmax(0, 1fr)',
+          gap: 24,
+          alignItems: 'center',
+          padding: 20,
+          background: 'radial-gradient(circle at 25% 38%, rgba(116,184,255,0.26), transparent 32%), linear-gradient(135deg, #04152e, #071d3f)',
+        }}>
+          <div aria-hidden="true" style={{
+            width: 132,
+            height: 132,
+            borderRadius: '50%',
+            justifySelf: 'center',
+            background: 'radial-gradient(circle at 31% 26%, #ffffff 0%, #a9ccff 17%, #416fbd 50%, #10213d 76%)',
+            boxShadow: '0 0 0 14px rgba(143,215,255,0.06), 0 0 48px rgba(116,184,255,0.34)',
+          }} />
+          <div>
+            <div style={{ color: '#9fc7ff', fontSize: 12, letterSpacing: '0.1em', marginBottom: 8 }}>SELECTED NASA ARCHIVE WORLD</div>
+            <h3 style={{ margin: 0, fontSize: 30 }}>{planet?.pl_name || 'Selected planet'}</h3>
+            <p style={{ color: '#d8e8f7', margin: '12px 0 18px', lineHeight: 1.6 }}>
+              {planet?.hostname || 'Host star unavailable'} · {planetKind(planet)} · {fmt(planet?.pl_orbper, 3)} D orbit
+            </p>
+            <button type="button" onClick={() => setViewerOpen(true)}>
+              LAUNCH NASA 3D VIEW
+            </button>
+            <p style={{ color: '#8fa9c4', margin: '12px 0 0', fontSize: 13, lineHeight: 1.5 }}>
+              The profile opens instantly. The heavy NASA 3D visualizer loads only when requested.
+            </p>
+          </div>
+        </div>
+      )}
+    </section>
+  )
+}) {
   const [viewerReady, setViewerReady] = useState(false)
   const src = nasaEyesUrl(planet, true)
   const fullUrl = nasaEyesUrl(planet, false)
@@ -1812,7 +1921,7 @@ function StarMapCanvas({ planets, selected, onSelect }) {
           ctx.font = '11px "IBM Plex Mono", monospace'
           ctx.fillText(period, labelX + 10, labelY + 36)
       })
-      raf = window.setTimeout(() => nextFrame(draw), 90)
+      raf = window.setTimeout(() => nextFrame(draw), 160)
     }
     draw()
     return () => {
