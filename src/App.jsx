@@ -1658,17 +1658,40 @@ function NasaEyesExperience({ planet, systemPlanets }) {
 function StarMapCanvas({ planets, selected, onSelect }) {
   const canvasRef = useRef(null)
   const [tooltip, setTooltip] = useState(null)
-  const mouse = useRef({ x: 0, y: 0 })
   const hovered = useRef(null)
+  const gridRef = useRef(new Map())
+  const lastHoverAt = useRef(0)
+  const lastViewPublish = useRef(0)
   const view = useRef({ scale: 1, x: 0, y: 0, dragging: false, lastX: 0, lastY: 0 })
   const [viewInfo, setViewInfo] = useState({ scale: 1, x: 0, y: 0 })
-  const stars = useMemo(() => Array.from({ length: 240 }, (_, index) => ({
+  const stars = useMemo(() => Array.from({ length: 150 }, (_, index) => ({
     x: seededRandom(`sx${index}`)(),
     y: seededRandom(`sy${index}`)(),
     z: 0.35 + seededRandom(`sz${index}`)() * 0.9
   })), [])
 
-  function publishView() {
+  const planetMeta = useMemo(() => {
+    const meta = new Map()
+    planets.forEach((planet) => {
+      const key = `${planet.pl_name || planet.hostname || 'world'}-${planet.ra}-${planet.dec}`
+      const random = seededRandom(`sky-spread-${key}`)
+      meta.set(key, {
+        angle: random() * Math.PI * 2,
+        jitter: 0.035 + random() * 0.07,
+        visual: planetTint(planet)
+      })
+    })
+    return meta
+  }, [planets])
+
+  function planetKey(planet) {
+    return `${planet.pl_name || planet.hostname || 'world'}-${planet.ra}-${planet.dec}`
+  }
+
+  function publishView(force = false) {
+    const timestamp = nowMs()
+    if (!force && timestamp - lastViewPublish.current < 80) return
+    lastViewPublish.current = timestamp
     setViewInfo({ scale: view.current.scale, x: view.current.x, y: view.current.y })
   }
 
@@ -1680,14 +1703,13 @@ function StarMapCanvas({ planets, selected, onSelect }) {
     const sphereY = Math.sin(dec)
     const sphereZ = Math.cos(dec) * Math.cos(ra - Math.PI)
     const perspective = clamp(0.7 + sphereZ * 0.26 - distance * 0.08, 0.46, 1.08)
-    const rand = seededRandom(`sky-spread-${planet.pl_name || planet.hostname || `${planet.ra}-${planet.dec}`}`)
-    const angle = rand() * Math.PI * 2
-    const jitter = (0.035 + rand() * 0.07) * (0.8 + distance * 0.65)
-    const driftX = Math.sin(ra * 2.3 + dec) * width * 0.075 + Math.cos(angle) * width * jitter
-    const driftY = Math.cos(ra * 1.7 - dec) * height * 0.055 + Math.sin(angle) * height * jitter * 0.72
+    const meta = planetMeta.get(planetKey(planet)) || { angle: 0, jitter: 0.05 }
+    const driftX = Math.sin(ra * 2.3 + dec) * width * 0.075 + Math.cos(meta.angle) * width * meta.jitter * (0.8 + distance * 0.65)
+    const driftY = Math.cos(ra * 1.7 - dec) * height * 0.055 + Math.sin(meta.angle) * height * meta.jitter * 0.72 * (0.8 + distance * 0.65)
     const current = view.current
     const localX = sphereX * width * 0.58 * (0.86 + perspective * 0.22) + driftX
     const localY = -sphereY * height * 0.51 * (0.86 + perspective * 0.18) + driftY
+
     return {
       x: localX * current.scale + width / 2 + current.x * perspective,
       y: localY * current.scale + height / 2 + current.y * perspective,
@@ -1706,18 +1728,20 @@ function StarMapCanvas({ planets, selected, onSelect }) {
     current.x = sx - (sx - current.x) * ratio
     current.y = sy - (sy - current.y) * ratio
     current.scale = next
-    publishView()
+    publishView(true)
   }
 
   function nudge(dx, dy) {
     view.current.x += dx
     view.current.y += dy
-    publishView()
+    publishView(true)
   }
 
   function resetView() {
     view.current = { scale: 1, x: 0, y: 0, dragging: false, lastX: 0, lastY: 0 }
-    publishView()
+    hovered.current = null
+    setTooltip(null)
+    publishView(true)
   }
 
   function zoomCenter(factor) {
@@ -1726,144 +1750,228 @@ function StarMapCanvas({ planets, selected, onSelect }) {
     zoomAt(factor, rect.width / 2, rect.height / 2, rect.width, rect.height)
   }
 
+  function findHit(x, y) {
+    const CELL = 72
+    const grid = gridRef.current
+    const cellX = Math.floor(x / CELL)
+    const cellY = Math.floor(y / CELL)
+    let nearest = null
+    let nearestDistance = 22
+
+    for (let dx = -1; dx <= 1; dx += 1) {
+      for (let dy = -1; dy <= 1; dy += 1) {
+        const candidates = grid.get(`${cellX + dx}:${cellY + dy}`) || []
+        candidates.forEach((item) => {
+          const distance = Math.hypot(item.point.x - x, item.point.y - y)
+          if (distance < item.radius + 12 && distance < nearestDistance) {
+            nearest = item
+            nearestDistance = distance
+          }
+        })
+      }
+    }
+    return nearest
+  }
+
   useEffect(() => {
     const canvas = canvasRef.current
+    if (!canvas) return undefined
     const ctx = canvas.getContext('2d')
-    let raf = 0
     let stopped = false
+    let resizeFrame = 0
+    let observer = null
+
+    const drawLabel = (item, accent, width, height) => {
+      const { planet, point, radius } = item
+      const name = planet.pl_name || 'Catalog world'
+      const period = `${fmt(planet.pl_orbper, 2)} D orbit`
+      ctx.font = '700 12px "IBM Plex Mono", monospace'
+      const widthName = Math.min(210, Math.max(112, ctx.measureText(name).width + 20))
+      const labelX = clamp(point.x + radius + 14, 12, width - widthName - 14)
+      const labelY = clamp(point.y - radius - 34, 14, height - 64)
+      ctx.strokeStyle = 'rgba(255,255,255,0.38)'
+      ctx.beginPath()
+      ctx.moveTo(point.x + radius * 0.75, point.y - radius * 0.35)
+      ctx.lineTo(labelX, labelY + 18)
+      ctx.stroke()
+      ctx.fillStyle = 'rgba(3, 7, 15, 0.88)'
+      ctx.fillRect(labelX, labelY, widthName, 46)
+      ctx.fillStyle = accent
+      ctx.fillRect(labelX, labelY, widthName, 3)
+      ctx.fillStyle = '#ffffff'
+      ctx.fillText(name.length > 24 ? `${name.slice(0, 22)}...` : name, labelX + 10, labelY + 20)
+      ctx.fillStyle = '#b9cfe4'
+      ctx.font = '11px "IBM Plex Mono", monospace'
+      ctx.fillText(period, labelX + 10, labelY + 36)
+    }
+
+    const drawFocusedPlanet = (item, selectedPlanet) => {
+      const { point, radius, visual } = item
+      const boost = selectedPlanet ? 1.45 : 1.25
+      const aura = ctx.createRadialGradient(point.x, point.y, radius * 0.2, point.x, point.y, radius * 3.15 * boost)
+      aura.addColorStop(0, selectedPlanet ? 'rgba(252,61,33,0.3)' : visual.rim)
+      aura.addColorStop(0.42, 'rgba(143,215,255,0.1)')
+      aura.addColorStop(1, 'rgba(0,0,0,0)')
+      ctx.globalAlpha = 1
+      ctx.fillStyle = aura
+      ctx.beginPath()
+      ctx.arc(point.x, point.y, radius * 3.15 * boost, 0, Math.PI * 2)
+      ctx.fill()
+
+      ctx.fillStyle = selectedPlanet ? 'rgba(252,61,33,0.22)' : 'rgba(143,215,255,0.16)'
+      ctx.beginPath()
+      ctx.arc(point.x, point.y, radius + (selectedPlanet ? 7 : 5), 0, Math.PI * 2)
+      ctx.fill()
+
+      const body = ctx.createRadialGradient(point.x - radius * 0.35, point.y - radius * 0.35, 1, point.x, point.y, radius * 1.4)
+      body.addColorStop(0, '#ffffff')
+      body.addColorStop(0.22, visual.core)
+      body.addColorStop(0.74, '#5e7ea6')
+      body.addColorStop(1, '#101520')
+      ctx.fillStyle = body
+      ctx.shadowBlur = 24
+      ctx.shadowColor = visual.core
+      ctx.beginPath()
+      ctx.arc(point.x, point.y, selectedPlanet ? radius + 3 : radius, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.shadowBlur = 0
+      ctx.strokeStyle = selectedPlanet ? '#fc3d21' : 'rgba(255,255,255,0.78)'
+      ctx.lineWidth = selectedPlanet ? 2 : 1
+      ctx.beginPath()
+      ctx.arc(point.x, point.y, radius + 0.5, 0, Math.PI * 2)
+      ctx.stroke()
+    }
+
     const draw = () => {
       if (stopped) return
       const rect = canvas.getBoundingClientRect()
-      const dpr = window.devicePixelRatio || 1
-      if (canvas.width !== Math.floor(rect.width * dpr) || canvas.height !== Math.floor(rect.height * dpr)) {
-        canvas.width = Math.floor(rect.width * dpr)
-        canvas.height = Math.floor(rect.height * dpr)
+      const width = Math.max(1, rect.width)
+      const height = Math.max(1, rect.height)
+      const dpr = Math.min(window.devicePixelRatio || 1, window.innerWidth < 760 ? 1.25 : 1.5)
+      const pixelWidth = Math.floor(width * dpr)
+      const pixelHeight = Math.floor(height * dpr)
+
+      if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+        canvas.width = pixelWidth
+        canvas.height = pixelHeight
       }
+
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-      const w = rect.width
-      const h = rect.height
-      ctx.clearRect(0, 0, w, h)
-      const sky = ctx.createRadialGradient(w * 0.62, h * 0.42, 10, w * 0.55, h * 0.48, Math.max(w, h) * 0.78)
+      ctx.clearRect(0, 0, width, height)
+
+      const sky = ctx.createRadialGradient(width * 0.62, height * 0.42, 10, width * 0.55, height * 0.48, Math.max(width, height) * 0.78)
       sky.addColorStop(0, '#08245a')
       sky.addColorStop(0.34, '#03152f')
       sky.addColorStop(0.72, '#010713')
       sky.addColorStop(1, '#000208')
       ctx.fillStyle = sky
-      ctx.fillRect(0, 0, w, h)
+      ctx.fillRect(0, 0, width, height)
+
       stars.forEach((star) => {
-        const x = star.x * w + mouse.current.x * star.z * 18 + view.current.x * star.z * 0.08
-        const y = star.y * h + mouse.current.y * star.z * 14 + view.current.y * star.z * 0.08
-        const twinkle = 0.55 + Math.sin(nowMs() * 0.001 + star.x * 12) * 0.2
-        ctx.fillStyle = `rgba(185,207,228,${(0.14 + star.z * 0.34) * twinkle})`
+        const x = star.x * width + view.current.x * star.z * 0.08
+        const y = star.y * height + view.current.y * star.z * 0.08
+        ctx.fillStyle = `rgba(185,207,228,${0.14 + star.z * 0.27})`
         ctx.beginPath()
-        ctx.arc((x + w) % w, (y + h) % h, star.z * 1.15, 0, Math.PI * 2)
+        ctx.arc((x + width) % width, (y + height) % height, star.z, 0, Math.PI * 2)
         ctx.fill()
       })
+
       ctx.save()
       ctx.globalAlpha = 0.18
       ctx.strokeStyle = 'rgba(143,215,255,0.28)'
       ctx.beginPath()
-      ctx.moveTo(0, h / 2)
-      ctx.lineTo(w, h / 2)
-      ctx.moveTo(w / 2, 0)
-      ctx.lineTo(w / 2, h)
+      ctx.moveTo(0, height / 2)
+      ctx.lineTo(width, height / 2)
+      ctx.moveTo(width / 2, 0)
+      ctx.lineTo(width / 2, height)
       ctx.stroke()
-      ctx.restore()
-      ctx.save()
-      ctx.globalAlpha = 0.18
       ctx.strokeStyle = 'rgba(185,207,228,0.2)'
       ctx.beginPath()
-      ctx.ellipse(w * 0.55, h * 0.52, w * 0.58, h * 0.18, -0.32, 0, Math.PI * 2)
-      ctx.ellipse(w * 0.58, h * 0.5, w * 0.36, h * 0.1, -0.32, 0, Math.PI * 2)
+      ctx.ellipse(width * 0.55, height * 0.52, width * 0.58, height * 0.18, -0.32, 0, Math.PI * 2)
+      ctx.ellipse(width * 0.58, height * 0.5, width * 0.36, height * 0.1, -0.32, 0, Math.PI * 2)
       ctx.stroke()
       ctx.restore()
-      const projected = planets
-        .map((planet) => ({ planet, point: projectPlanet(planet, w, h) }))
-        .sort((a, b) => a.point.depth - b.point.depth)
-      projected.forEach(({ planet, point }) => {
-        const { x, y, depth, distance } = point
-        if (x < -80 || x > w + 80 || y < -80 || y > h + 80) return
-        const visual = planetTint(planet)
-        const radius = clamp(Math.sqrt(Number(planet.pl_rade || 1.4)) * 2.8 * Math.sqrt(view.current.scale) * (0.72 + depth * 0.34), 3.2, 19)
-        const isSelected = selected?.pl_name === planet.pl_name
-        const isHovered = hovered.current?.pl_name === planet.pl_name
-        const selectedBoost = isSelected ? 1.45 : isHovered ? 1.25 : 1
+
+      const CELL = 72
+      const grid = new Map()
+      const focused = []
+      const selectedName = selected?.pl_name || ''
+      const hoverName = hovered.current?.pl_name || ''
+
+      planets.forEach((planet) => {
+        const point = projectPlanet(planet, width, height)
+        if (point.x < -24 || point.x > width + 24 || point.y < -24 || point.y > height + 24) return
+
+        const radius = clamp(
+          Math.sqrt(Number(planet.pl_rade || 1.4)) * 2.45 * Math.sqrt(view.current.scale) * (0.72 + point.depth * 0.34),
+          2.25,
+          15
+        )
+        const item = {
+          planet,
+          point,
+          radius,
+          visual: planetMeta.get(planetKey(planet))?.visual || planetTint(planet)
+        }
+
+        const gridKey = `${Math.floor(point.x / CELL)}:${Math.floor(point.y / CELL)}`
+        const bucket = grid.get(gridKey)
+        if (bucket) bucket.push(item)
+        else grid.set(gridKey, [item])
+
+        const isSelected = planet.pl_name === selectedName
+        const isHovered = planet.pl_name === hoverName
+
+        if (isSelected || isHovered) {
+          focused.push({ item, isSelected })
+          return
+        }
+
+        ctx.globalAlpha = clamp(0.45 + point.depth * 0.34 - point.distance * 0.16, 0.28, 0.9)
+        ctx.fillStyle = item.visual.rim
         ctx.beginPath()
-        const aura = ctx.createRadialGradient(x, y, radius * 0.2, x, y, radius * 3.1 * selectedBoost)
-        aura.addColorStop(0, isSelected ? 'rgba(252,61,33,0.3)' : visual.rim)
-        aura.addColorStop(0.42, 'rgba(143,215,255,0.1)')
-        aura.addColorStop(1, 'rgba(0,0,0,0)')
-        ctx.globalAlpha = clamp(0.52 + depth * 0.42 - distance * 0.18, 0.36, 1)
-        ctx.fillStyle = aura
-        ctx.arc(x, y, radius * 3.1 * selectedBoost, 0, Math.PI * 2)
+        ctx.arc(point.x, point.y, radius + 1.05, 0, Math.PI * 2)
         ctx.fill()
         ctx.globalAlpha = 1
+        ctx.fillStyle = item.visual.core
         ctx.beginPath()
-        ctx.arc(x, y, radius + (isSelected ? 7 : isHovered ? 5 : 2), 0, Math.PI * 2)
-        ctx.fillStyle = isSelected ? 'rgba(252,61,33,0.22)' : 'rgba(143,215,255,0.16)'
+        ctx.arc(point.x, point.y, radius, 0, Math.PI * 2)
         ctx.fill()
-        ctx.beginPath()
-        ctx.arc(x, y, isSelected ? radius + 3 : radius, 0, Math.PI * 2)
-        const body = ctx.createRadialGradient(x - radius * 0.35, y - radius * 0.35, 1, x, y, radius * 1.4)
-        body.addColorStop(0, '#ffffff')
-        body.addColorStop(0.22, visual.core)
-        body.addColorStop(0.74, '#5e7ea6')
-        body.addColorStop(1, '#101520')
-        ctx.fillStyle = body
-        ctx.shadowBlur = isSelected || isHovered ? 26 : 14
-        ctx.shadowColor = visual.core
-        ctx.fill()
-        ctx.shadowBlur = 0
-        ctx.strokeStyle = isSelected ? '#fc3d21' : 'rgba(255,255,255,0.7)'
-        ctx.lineWidth = isSelected ? 2 : 1
-        ctx.beginPath()
-        ctx.arc(x, y, radius + 0.5, 0, Math.PI * 2)
-        ctx.stroke()
-        if (planet.disc_facility?.includes('Kepler')) {
-          ctx.strokeStyle = 'rgba(143,215,255,0.38)'
-          ctx.beginPath()
-          ctx.arc(x, y, radius + 4, 0, Math.PI * 2)
-          ctx.stroke()
-        }
       })
-      projected
-        .filter(({ planet }) => selected?.pl_name === planet.pl_name || hovered.current?.pl_name === planet.pl_name)
-        .slice(-2)
-        .forEach(({ planet, point }) => {
-          const radius = clamp(Math.sqrt(Number(planet.pl_rade || 1.4)) * 2.8 * Math.sqrt(view.current.scale) * (0.72 + point.depth * 0.34), 3.2, 19)
-          const name = planet.pl_name || 'Catalog world'
-          const period = `${fmt(planet.pl_orbper, 2)} D orbit`
-          ctx.font = '700 12px "IBM Plex Mono", monospace'
-          const widthName = Math.min(210, Math.max(112, ctx.measureText(name).width + 20))
-          const labelX = clamp(point.x + radius + 14, 12, w - widthName - 14)
-          const labelY = clamp(point.y - radius - 34, 14, h - 64)
-          ctx.strokeStyle = 'rgba(255,255,255,0.38)'
-          ctx.beginPath()
-          ctx.moveTo(point.x + radius * 0.75, point.y - radius * 0.35)
-          ctx.lineTo(labelX, labelY + 18)
-          ctx.stroke()
-          ctx.fillStyle = 'rgba(3, 7, 15, 0.88)'
-          ctx.fillRect(labelX, labelY, widthName, 46)
-          ctx.fillStyle = selected?.pl_name === planet.pl_name ? '#fc3d21' : '#6fb6ff'
-          ctx.fillRect(labelX, labelY, widthName, 3)
-          ctx.fillStyle = '#ffffff'
-          ctx.fillText(name.length > 24 ? `${name.slice(0, 22)}...` : name, labelX + 10, labelY + 20)
-          ctx.fillStyle = '#b9cfe4'
-          ctx.font = '11px "IBM Plex Mono", monospace'
-          ctx.fillText(period, labelX + 10, labelY + 36)
+
+      gridRef.current = grid
+      ctx.globalAlpha = 1
+
+      focused.slice(-2).forEach(({ item, isSelected }) => {
+        drawFocusedPlanet(item, isSelected)
+        drawLabel(item, isSelected ? '#fc3d21' : '#6fb6ff', width, height)
       })
-      raf = window.setTimeout(() => nextFrame(draw), 250)
     }
+
     draw()
+
+    const onResize = () => {
+      if (resizeFrame) stopFrame(resizeFrame)
+      resizeFrame = nextFrame(draw)
+    }
+
+    window.addEventListener('resize', onResize)
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(onResize)
+      observer.observe(canvas)
+    }
+
     return () => {
       stopped = true
-      window.clearTimeout(raf)
-      stopFrame(raf)
+      window.removeEventListener('resize', onResize)
+      if (observer) observer.disconnect()
+      if (resizeFrame) stopFrame(resizeFrame)
     }
-  }, [planets, selected, stars])
+  }, [planets, selected, stars, viewInfo, tooltip, planetMeta])
 
   function handleMove(event) {
     const rect = event.currentTarget.getBoundingClientRect()
+
     if (view.current.dragging) {
       view.current.wasDragging = true
       view.current.x += event.clientX - view.current.lastX
@@ -1871,26 +1979,24 @@ function StarMapCanvas({ planets, selected, onSelect }) {
       view.current.lastX = event.clientX
       view.current.lastY = event.clientY
       publishView()
+      return
     }
-    mouse.current = {
-      x: ((event.clientX - rect.left) / rect.width - 0.5) * 2,
-      y: ((event.clientY - rect.top) / rect.height - 0.5) * 2
-    }
+
+    const timestamp = nowMs()
+    if (timestamp - lastHoverAt.current < 50) return
+    lastHoverAt.current = timestamp
+
     const x = event.clientX - rect.left
     const y = event.clientY - rect.top
-    let nearest = null
-    let nearestDistance = 18
-    planets.forEach((planet) => {
-      const point = projectPlanet(planet, rect.width, rect.height)
-      const radius = clamp(Math.sqrt(Number(planet.pl_rade || 1.4)) * 2.8 * Math.sqrt(view.current.scale) * (0.72 + point.depth * 0.34), 3.2, 19)
-      const distance = Math.hypot(point.x - x, point.y - y)
-      if (distance < radius + 12 && distance < nearestDistance) {
-        nearest = planet
-        nearestDistance = distance
-      }
-    })
-    hovered.current = nearest
-    setTooltip(nearest ? { x, y, planet: nearest } : null)
+    const hit = findHit(x, y)
+    const nearest = hit?.planet || null
+    const previousName = hovered.current?.pl_name || ''
+    const nextName = nearest?.pl_name || ''
+
+    if (previousName !== nextName) {
+      hovered.current = nearest
+      setTooltip(nearest ? { x, y, planet: nearest } : null)
+    }
   }
 
   function handleClick(event) {
@@ -1898,15 +2004,10 @@ function StarMapCanvas({ planets, selected, onSelect }) {
       view.current.wasDragging = false
       return
     }
+
     const rect = event.currentTarget.getBoundingClientRect()
-    const x = event.clientX - rect.left
-    const y = event.clientY - rect.top
-    const hit = planets.find((planet) => {
-      const point = projectPlanet(planet, rect.width, rect.height)
-      const radius = clamp(Math.sqrt(Number(planet.pl_rade || 1.4)) * 2.8 * Math.sqrt(view.current.scale) * (0.72 + point.depth * 0.34), 3.2, 19)
-      return Math.hypot(point.x - x, point.y - y) < radius + 12
-    })
-    if (hit) onSelect(hit)
+    const hit = findHit(event.clientX - rect.left, event.clientY - rect.top)
+    if (hit?.planet) onSelect(hit.planet)
   }
 
   function handleWheel(event) {
@@ -1924,6 +2025,7 @@ function StarMapCanvas({ planets, selected, onSelect }) {
 
   function handleUp() {
     view.current.dragging = false
+    publishView(true)
   }
 
   return (
@@ -1934,7 +2036,11 @@ function StarMapCanvas({ planets, selected, onSelect }) {
         onMouseMove={handleMove}
         onMouseDown={handleDown}
         onMouseUp={handleUp}
-        onMouseLeave={() => { hovered.current = null; setTooltip(null); handleUp() }}
+        onMouseLeave={() => {
+          hovered.current = null
+          setTooltip(null)
+          handleUp()
+        }}
         onWheel={handleWheel}
         onClick={handleClick}
       />
